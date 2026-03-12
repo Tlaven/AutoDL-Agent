@@ -5,8 +5,9 @@ from datetime import UTC, datetime
 from typing import Any, Callable, List
 
 from langchain_core.tools import tool
-
+import json
 from common.prompts import PLANNER_RULES
+from src.executor_agent.graph import run_executor
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +27,46 @@ async def activate_planner_mode() -> str:
 
 
 @tool
-async def execute_plan() -> str:
-    """执行已制定的 Plan（当前占位）。
-
-    使用场景：Planner 模式下认为计划已成熟时调用。
-    后续会切换到独立的 Executor 子 Agent（不同上下文 + 更多工具）。
+async def execute_plan(plan_json: str) -> str:
+    """当规划阶段认为计划已经足够完整时调用此工具。
+    将结构化的计划交给独立的 Executor Agent 执行。
+    Executor 将拥有独立的上下文和 ReAct 循环。
+    
+    参数：
+    plan_json: 必须是合法的 JSON 字符串，包含完整的训练计划
     """
-    logger.info("execute_plan 被调用（占位模式）")
-    return "执行模式已激活（占位）。计划执行逻辑开发中，请继续在 Planner 模式下完善计划。"
+    try:
+        plan = json.loads(plan_json)
+        plan_str = json.dumps(plan, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"计划 JSON 格式错误，无法启动 Executor：{str(e)}"
+
+    # 准备给 executor 的初始消息
+    initial_messages = [
+        ("system", "立即开始执行以下计划，不要询问用户，直接使用工具推进。"),
+        ("human", f"执行计划：\n```json\n{plan_str}\n```")
+    ]
+
+    try:
+        result = await run_executor(initial_messages)
+        
+        # 简单提取最终输出（可以根据需要更精细地解析）
+        messages = result["messages"]
+        final_msg = messages[-1]
+        
+        if hasattr(final_msg, "content") and final_msg.content:
+            summary = final_msg.content[:1200] + "..." if len(final_msg.content) > 1200 else final_msg.content
+        else:
+            summary = "Executor 完成，但未返回可读文本总结。"
+
+        return (
+            f"Executor Agent 已完成执行。\n"
+            f"最终输出摘要：\n{summary}\n\n"
+            f"完整消息历史长度：{len(messages)}"
+        )
+    except Exception as e:
+        import traceback
+        return f"Executor 执行过程中发生异常：\n{str(e)}\n{traceback.format_exc()[:800]}"
 
 
 async def get_tools() -> List[Callable[..., Any]]:
