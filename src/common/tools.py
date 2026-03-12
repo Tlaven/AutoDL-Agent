@@ -1,44 +1,41 @@
-"""This module provides example tools for web scraping and search functionality.
-
-It includes a basic Tavily search function (as an example)
-
-These tools are intended as free examples to get started. For production use,
-consider implementing more robust and specialized tools tailored to your needs.
-"""
+"""AutoDL-Agent 主循环工具 - 永远只绑定 Planner 两个工具"""
 
 import logging
-from typing import Any, Callable, List, Optional, cast
+from datetime import UTC, datetime
+from typing import Any, Callable, List
 
-from langchain_tavily import TavilySearch
-from langgraph.runtime import get_runtime
+from langchain_core.tools import tool
 
-from common.context import Context
-from common.mcp import get_deepwiki_tools
+from common.prompts import PLANNER_RULES
 
 logger = logging.getLogger(__name__)
 
 
-async def web_search(query: str) -> Optional[dict[str, Any]]:
-    """Search for general web results.
+@tool
+async def activate_planner_mode() -> str:
+    """激活 Planner 模式。
 
-    This function performs a search using the Tavily search engine, which is designed
-    to provide comprehensive, accurate, and trusted results. It's particularly useful
-    for answering questions about current events.
+    使用场景：面对复杂任务时，应当制定Plan。
+    调用后会向消息历史一次性追加完整的 Planner 工作守则。
     """
-    runtime = get_runtime(Context)
-    wrapped = TavilySearch(max_results=runtime.context.max_search_results)
-    return cast(dict[str, Any], await wrapped.ainvoke({"query": query}))
+    rules = PLANNER_RULES.format(
+        system_time=datetime.now(tz=UTC).isoformat()
+    )
+    logger.info("Planner 模式已激活 - 守则已追加到历史上下文")
+    return rules
+
+
+@tool
+async def execute_plan() -> str:
+    """执行已制定的 Plan（当前占位）。
+
+    使用场景：Planner 模式下认为计划已成熟时调用。
+    后续会切换到独立的 Executor 子 Agent（不同上下文 + 更多工具）。
+    """
+    logger.info("execute_plan 被调用（占位模式）")
+    return "执行模式已激活（占位）。计划执行逻辑开发中，请继续在 Planner 模式下完善计划。"
 
 
 async def get_tools() -> List[Callable[..., Any]]:
-    """Get all available tools based on configuration."""
-    tools = [web_search]
-
-    runtime = get_runtime(Context)
-
-    if runtime.context.enable_deepwiki:
-        deepwiki_tools = await get_deepwiki_tools()
-        tools.extend(deepwiki_tools)
-        logger.info(f"Loaded {len(deepwiki_tools)} deepwiki tools")
-
-    return tools
+    """主 ReAct 循环永远只返回这两个工具（符合用户要求）。"""
+    return [activate_planner_mode, execute_plan]
