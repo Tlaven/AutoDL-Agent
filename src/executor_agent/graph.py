@@ -1,5 +1,6 @@
 # executor_agent/graph.py
 
+from langchain_core.messages import AIMessage
 from langgraph.prebuilt import create_react_agent
 from langchain_core.runnables import Runnable
 from common.utils import load_chat_model  # 假设你有这个工具函数
@@ -20,4 +21,8 @@ executor_agent = create_react_agent(
 # 为了方便外部调用，暴露一个 async run 方法
 async def run_executor(initial_messages):
     result = await executor_agent.ainvoke({"messages": initial_messages})
-    return result
+    messages = result['messages']
+    # 检查类型并提取内容
+    for message in messages:
+        if isinstance(message, AIMessage):  # 检查是否是 AIMessage 类的实例
+            return message.content
