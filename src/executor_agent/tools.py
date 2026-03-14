@@ -53,3 +53,7 @@ async def save_final_report(summary: str, metrics: dict, model_path: str = "") -
         "timestamp": "2025-03-12T23:55:00Z"
     }
     return f"报告已生成：\n{json.dumps(report, indent=2, ensure_ascii=False)}"
+
+
+def get_executor_tools():
+    return [search_huggingface_hub, propose_training_code, save_final_report]
