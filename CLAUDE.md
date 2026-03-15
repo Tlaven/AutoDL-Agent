@@ -35,9 +35,10 @@ Supervisor Agent（主循环）          src/supervisor_agent/
   │                       - 特性：SYSTEM_PROMPT 注入消息列表开头，PLANNER_SYSTEM_PROMPT 严格放在最后
   │
   └── execute_plan ───▶ Executor Agent   src/executor_agent/
-                          - 框架：create_react_agent（LangGraph prebuilt）
+                          - 框架：自定义 StateGraph（ReAct 模式，含 ExecutorState）
                           - 模型：siliconflow:Pro/deepseek-ai/DeepSeek-V3.2
-                          - 职责：按 JSON 计划逐步调用工具，完成实际操作
+                          - 职责：按意图层 JSON 计划自主选工具执行，完成后返回带步骤状态的 updated_plan
+                          - 返回值：ExecutorResult(status, updated_plan_json, summary)
 ```
 
 ### 入口
@@ -51,94 +52,105 @@ Supervisor Agent（主循环）          src/supervisor_agent/
 
 `execute_plan` 工具**不接受 LLM 传入参数**，改用 `InjectedState` 注入 State，自己从 `state.planner_session.plan_json` 取计划。
 
-```python
-@tool
-async def execute_plan(state: Annotated[State, InjectedState]) -> str:
-    plan = state.planner_session.plan_json  # 直接从 State 取，不依赖 LLM 填参
-```
-
 `generate_plan` 同样使用 `InjectedState`，从 `state.messages` 取完整历史传给 Planner。
 
 原因：避免 LLM 错误传参，保证计划来源可信。
 
-### 2. ExecutorRef 记录执行状态（部分实现）
+### 2. Plan 是"意图层"，不包含工具名（重要）
 
-`State` 已定义 `executors: dict[str, ExecutorRef]` 字段，结构已就绪：
+Planner **不知道 Executor 有哪些工具**，Plan 的每个 step 只描述**意图和期望产出**，不指定工具名称。Executor 自主根据 intent 选择合适的工具。
 
+好处：Planner 与 Executor 工具集完全解耦，更换工具无需修改 Planner 提示词。
+
+Plan JSON schema（每个 step）：
+```json
+{
+  "step_id": "step_1",
+  "intent": "意图描述（不含工具名）",
+  "expected_output": "完成验收标准",
+  "status": "pending / completed / failed / skipped",
+  "result_summary": "成功时的摘要，初始为 null",
+  "failure_reason": "失败时的原因，初始为 null"
+}
 ```
-执行开始 → ExecutorRef(status="running")
-执行完成 → ExecutorRef(status="completed")
-执行失败 → ExecutorRef(status="failed")
-```
 
-**当前实现现状**：`execute_plan` 工具目前通过 ToolMessage 的文本内容携带执行状态信息（`[执行记录] executor_session_id=... status=...`），尚未将 `ExecutorRef` 真正写入 `state.executors` dict。这是待完成的 TODO 项。
+### 3. Executor 上报执行状态，重规划走 Supervisor
 
-### 3. 执行结果路由（LLM 自主决策）
+Executor 遇到无法继续的情况时**直接停止**，把带执行状态的 updated_plan 返回给 Supervisor，**不在 Executor 内部主动重规划**。
 
-Executor 执行完后，结果返回给 Supervisor，**由 LLM 自主判断**走哪条路：
-
+重规划决策权在 Supervisor：
 ```
 Supervisor 收到 Executor 结果
-  ├── 成功(completed) → 汇报用户，结束
-  └── 失败(failed)
-        ├── 可调整 → 调 generate_plan 重规划（携带完整历史 + 失败原因）→ 再 execute_plan
-        └── 无法解决（多次失败仍无法推进）→ 告知用户，搁置（当前阶段先不处理）
+  ├── status=completed → 汇报用户，结束
+  └── status=failed
+        ├── 可调整 → 调 generate_plan（Planner 能看到带状态的 plan）→ 再 execute_plan（新 Executor，跳过已完成步骤）
+        └── 多次失败无法推进 → 告知用户
 ```
 
-路由方式选 **LLM 自主判断**（而非硬编码路由），原因：Supervisor 的 `state.messages` 保留完整历史上下文，LLM 可以据此做更智能的决策；重规划时 Planner 也能看到失败记录。Supervisor 提示词中明确限制**重规划不超过 3 次**，避免无效循环。
+### 4. ExecutorResult 结构化返回值
 
-### 4. 单线程执行
+`run_executor()` 不再返回 `AIMessage`，改为返回 `ExecutorResult`：
+```python
+@dataclass
+class ExecutorResult:
+    status: Literal["completed", "failed"]
+    updated_plan_json: str   # 带步骤执行状态的完整 plan JSON
+    summary: str             # 给 Supervisor LLM 读的摘要
+```
+
+`execute_plan` 工具把 `updated_plan_json` 嵌入返回文本（`[EXECUTOR_RESULT] {...}`），`dynamic_tools_node` 解析后写回 `planner_session.plan_json`。
+
+**失败处理保障（已实现）**：
+- 正常失败（Executor LLM 主动停止）：`updated_plan_json` 由 Executor 自行填写各步骤 `status/failure_reason`
+- 异常崩溃（Python Exception）：`execute_plan` 捕获异常，调用 `_mark_plan_steps_failed()` 把所有 `pending` 步骤标记为 `failed` 并写入 `failure_reason`，确保 `updated_plan_json` 永不为空
+- `dynamic_tools_node` 解析 `[EXECUTOR_RESULT]` 时同时提取 `status` 和 `error_detail`，写入 `PlannerSession.last_executor_status / last_executor_error`
+
+### 5. generate_plan 传入带执行状态的 plan（修订场景）
+
+重规划时，`generate_plan` 工具会把 `planner_session.plan_json`（已含执行状态）拼入消息末尾，作为 `HumanMessage` 传给 Planner，让 Planner 在修订时能看到哪些步骤已完成、哪步失败及原因。
+
+### 6. dynamic_tools_node 同步 PlannerSession（双向）
+
+- `generate_plan` 执行后：将新 plan_json 写入 `planner_session`
+- `execute_plan` 执行后：将 `updated_plan_json`（带执行状态）写回 `planner_session`
+
+这样 `planner_session.plan_json` 始终是**最新版本的 plan**（含执行进度）。
+
+### 7. 单线程执行
 
 当前阶段明确为**单线程**，不做并发 Executor。
 
-### 5. Executor 工具现状（占位，后续重做）
+### 8. Executor 工具现状（空，待接入）
 
-`src/executor_agent/tools.py` 中的三个工具均为**占位实现（mock）**，后续会删掉重新接入真实 API：
+`src/executor_agent/tools.py` 当前返回空列表，待后续接入真实工具：
+- `search_huggingface_hub`：搜索 HuggingFace Hub 上的模型和数据集
+- `propose_training_code`：生成可运行的训练代码
+- `execute_training_code`：本地执行训练脚本（subprocess）
+- `save_final_report`：保存实验报告
 
-| 工具 | 状态 | 说明 |
-|---|---|---|
-| `search_huggingface_hub` | mock | 返回硬编码假数据 |
-| `propose_training_code` | mock | 返回固定模板代码 |
-| `save_final_report` | mock | 返回固定格式字符串 |
-
-**当前不需要关注这些工具的实现细节。**
-
-### 6. Planner 工具现状（定义但未绑定）
+### 9. Planner 工具现状（定义但未绑定）
 
 `src/planner_agent/tools.py` 中的四个工具已定义但**未绑定到 graph**，当前 Planner 是纯 LLM 调用（无工具）。这是有意为之，后续迭代再绑定。
 
-### 7. Planner 提示词结构
+### 10. Planner 提示词结构与消息过滤
 
-Planner 调用时的消息顺序（已实现）：
-1. `SystemMessage(SYSTEM_PROMPT)` —— 全局背景（放开头）
-2. `state.messages[:-1]` —— 历史消息（除最后一条）
-3. `SystemMessage(PLANNER_SYSTEM_PROMPT)` —— Planner 规则和 JSON 格式要求（严格放最后）
+Planner 调用时的消息处理逻辑（已实现）：
+1. 过滤掉所有带 `tool_calls` 的 `AIMessage`（对 Planner 无意义，可能造成误解）
+2. 若消息列表中尚未包含 `SYSTEM_PROMPT`，则插入 `SystemMessage(SYSTEM_PROMPT)` 到开头
+3. 追加 `HumanMessage(PLANNER_SYSTEM_PROMPT)` 到最后（注意：必须用 HumanMessage，不能用 SystemMessage；DeepSeek/SiliconFlow API 要求 system 消息只能出现在列表第一条，放到末尾会报 400）
 
-`PLANNER_SYSTEM_PROMPT` 要求输出 Plan 之外有一点思考，JSON 放在 ` ```json ``` ` 代码块中，`run_planner()` 会自动提取代码块内容。
-
-### 8. dynamic_tools_node 同步 PlannerSession
-
-`dynamic_tools_node` 执行 `generate_plan` 工具后，自动提取 ToolMessage 内容，通过 `_extract_generate_plan_output()` 函数写入 `state.planner_session`，供后续 `execute_plan` 使用。逻辑：复用已有 `session_id` 或新建。
+`PLANNER_SYSTEM_PROMPT` 要求输出 Plan 之外有一点思考，JSON 放在 ` ```json ``` ` 代码块中，`run_planner()` 会自动提取。
 
 ---
 
 ## 后续计划
 
-### 近期（当前迭代）
-
-- [x] 重构 `execute_plan` 为 InjectedState 方式（不再依赖 LLM 传参）
-- [x] 修复 `run_executor` 入参 bug（字符串→HumanMessage）
-- [x] `dynamic_tools_node` 执行完工具后同步更新 `PlannerSession.plan_json` 到 State
-- [x] 优化 Executor 和 Supervisor 提示词（重规划次数限制、工作流程明确化）
-- [x] `generate_plan` 同样改为 InjectedState，直接从 `state.messages` 取历史
-- [x] Planner 提示词结构调整（SYSTEM_PROMPT 开头，PLANNER_RULES 最后）
-- [ ] ExecutorRef 完整写入 `state.executors`（当前仅通过 ToolMessage 文本携带）
-
 ### 中期
 
-- [ ] Executor 工具接入真实 HuggingFace Hub API
+- [ ] Executor 工具接入真实 HuggingFace Hub API（`search_huggingface_hub`）
 - [ ] `propose_training_code` 生成真实可运行的训练代码文件（写入本地 .py 文件）
 - [ ] 添加本地执行训练代码的工具（`execute_training_code`，用 subprocess）
+- [ ] `save_final_report` 写入本地文件
 - [ ] 补充测试用例（tests/ 目前全为空）
 
 ### 远期（进阶功能）
@@ -152,17 +164,17 @@ Planner 调用时的消息顺序（已实现）：
 
 | 文件 | 职责 |
 |---|---|
-| `src/supervisor_agent/graph.py` | 主循环图定义，`call_model` + `dynamic_tools_node` + `_extract_generate_plan_output` |
-| `src/supervisor_agent/state.py` | `State`、`InputState`、`PlannerSession`、`ExecutorRef` |
-| `src/supervisor_agent/tools.py` | `generate_plan`、`execute_plan` 两个主循环工具（均用 InjectedState） |
+| `src/supervisor_agent/graph.py` | 主循环图定义，`call_model` + `dynamic_tools_node` + `_build_id_to_name` + `_extract_updated_plan_from_executor` + `_extract_executor_status` |
+| `src/supervisor_agent/state.py` | `State`、`InputState`、`PlannerSession`（含 `last_executor_status/last_executor_error`）、`ExecutorRef` |
+| `src/supervisor_agent/tools.py` | `generate_plan`、`execute_plan`、`_mark_plan_steps_failed` |
 | `src/planner_agent/graph.py` | Planner 图，`call_planner` 节点，`run_planner()` 对外接口（含 JSON 提取） |
-| `src/planner_agent/prompts.py` | `PLANNER_SYSTEM_PROMPT`，含 JSON 计划格式要求，放消息列表最后 |
+| `src/planner_agent/prompts.py` | `PLANNER_SYSTEM_PROMPT`，含意图层 Plan JSON 格式要求（含步骤状态字段），放消息列表最后 |
 | `src/planner_agent/tools.py` | 4 个规划工具（已定义，未绑定到 graph） |
-| `src/executor_agent/graph.py` | Executor ReAct agent，`run_executor()` 对外接口 |
-| `src/executor_agent/prompts.py` | `EXECUTOR_SYSTEM_PROMPT`，执行原则和输出格式 |
-| `src/executor_agent/tools.py` | 3 个执行工具（均为占位 mock） |
+| `src/executor_agent/graph.py` | Executor 自定义 StateGraph，`ExecutorState`、`ExecutorResult`、`call_executor` + `tools_node` + `route_executor_output`、`_parse_executor_output`、`run_executor()` 对外接口 |
+| `src/executor_agent/prompts.py` | `EXECUTOR_SYSTEM_PROMPT`，按 intent 自主选工具，遇阻停止，输出 updated_plan |
+| `src/executor_agent/tools.py` | 空列表占位，待接入真实工具 |
 | `src/common/context.py` | 运行时配置，支持环境变量覆盖 |
-| `src/common/prompts.py` | `SYSTEM_PROMPT`，Supervisor 全局系统提示（注入 Planner 消息开头 + Supervisor 主循环） |
+| `src/common/prompts.py` | `SYSTEM_PROMPT`，Supervisor 全局系统提示 |
 | `src/common/utils.py` | `load_chat_model("provider:model")` 统一入口 |
 | `src/common/models/qwen.py` | Qwen/QwQ/QvQ 模型，支持国内/国际端点 |
 | `src/common/models/siliconflow.py` | SiliconFlow 模型，支持国内/国际端点 |

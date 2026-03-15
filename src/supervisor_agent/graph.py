@@ -56,66 +56,103 @@ async def dynamic_tools_node(
 ) -> Dict:
     """动态执行工具，并同步更新 PlannerSession 状态。
 
-    执行完工具后，检查是否有 generate_plan 的输出，
-    若有则将 plan_json 写入 state.planner_session，供 execute_plan 读取。
+    - generate_plan 执行后：将新 plan_json 写入 planner_session
+    - execute_plan 执行后：将 updated_plan_json（带执行状态）写回 planner_session
     """
     available_tools = await get_tools()
     tool_node = ToolNode(available_tools)
     result = await tool_node.ainvoke(state)
 
-    # 找出本次工具调用中 generate_plan 对应的 ToolMessage
     tool_messages: List[ToolMessage] = result.get("messages", [])
-    plan_json_from_tool = _extract_generate_plan_output(state, tool_messages)
+    id_to_name = _build_id_to_name(state)
 
     updates: Dict = {"messages": tool_messages}
-
-    if plan_json_from_tool is not None:
-        # 复用已有 session_id，或新建
-        if state.planner_session is not None:
-            session_id = state.planner_session.session_id
-        else:
-            session_id = f"plan_{uuid.uuid4().hex[:8]}"
-
-        updates["planner_session"] = PlannerSession(
-            session_id=session_id,
-            plan_json=plan_json_from_tool,
-        )
-        logger.info("PlannerSession 已更新，session_id=%s", session_id)
-
-    return updates
-
-
-def _extract_generate_plan_output(
-    state: State, tool_messages: List[ToolMessage]
-) -> str | None:
-    """从工具执行结果中提取 generate_plan 的输出。
-
-    通过匹配 AIMessage 中的 tool_calls name 来定位对应的 ToolMessage。
-
-    Returns:
-        str: generate_plan 的返回内容；若本次未调用 generate_plan 则返回 None。
-    """
-    if not state.messages:
-        return None
-
-    last_ai = state.messages[-1]
-    if not isinstance(last_ai, AIMessage) or not last_ai.tool_calls:
-        return None
-
-    # 建立 tool_call_id → tool_name 的映射
-    id_to_name: Dict[str, str] = {
-        tc["id"]: tc["name"] for tc in last_ai.tool_calls if "id" in tc and "name" in tc
-    }
 
     for tm in tool_messages:
         if not isinstance(tm, ToolMessage):
             continue
-        if id_to_name.get(tm.tool_call_id) == "generate_plan":
-            content = tm.content if isinstance(tm.content, str) else str(tm.content)
-            if content.strip():
-                return content.strip()
+        tool_name = id_to_name.get(tm.tool_call_id, "")
+        content = tm.content if isinstance(tm.content, str) else str(tm.content)
 
-    return None
+        if tool_name == "generate_plan" and content.strip():
+            session_id = (
+                state.planner_session.session_id
+                if state.planner_session is not None
+                else f"plan_{uuid.uuid4().hex[:8]}"
+            )
+            updates["planner_session"] = PlannerSession(
+                session_id=session_id,
+                plan_json=content.strip(),
+            )
+            logger.info("PlannerSession 已更新（generate_plan），session_id=%s", session_id)
+
+        elif tool_name == "execute_plan":
+            updated_plan = _extract_updated_plan_from_executor(content)
+            exec_status, exec_error = _extract_executor_status(content)
+            if state.planner_session is not None:
+                updates["planner_session"] = PlannerSession(
+                    session_id=state.planner_session.session_id,
+                    plan_json=updated_plan if updated_plan else state.planner_session.plan_json,
+                    last_executor_status=exec_status,
+                    last_executor_error=exec_error,
+                )
+                logger.info(
+                    "PlannerSession 已更新（execute_plan 回填），session_id=%s，status=%s",
+                    state.planner_session.session_id,
+                    exec_status,
+                )
+
+    return updates
+
+
+def _build_id_to_name(state: State) -> Dict[str, str]:
+    """从最后一条 AIMessage 中构建 tool_call_id → tool_name 的映射。"""
+    if not state.messages:
+        return {}
+    last_ai = state.messages[-1]
+    if not isinstance(last_ai, AIMessage) or not last_ai.tool_calls:
+        return {}
+    return {
+        tc["id"]: tc["name"]
+        for tc in last_ai.tool_calls
+        if "id" in tc and "name" in tc
+    }
+
+
+def _extract_updated_plan_from_executor(content: str) -> str | None:
+    """从 execute_plan 返回的 ToolMessage 内容中提取 updated_plan_json。
+
+    约定格式：内容末尾有一行 `[EXECUTOR_RESULT] {...json...}`
+    """
+    import json as _json
+    import re as _re
+    match = _re.search(r'\[EXECUTOR_RESULT\]\s*(\{.*\})', content, _re.DOTALL)
+    if not match:
+        return None
+    try:
+        meta = _json.loads(match.group(1))
+        updated = meta.get("updated_plan_json", "")
+        return updated if updated else None
+    except _json.JSONDecodeError:
+        logger.warning("execute_plan 返回的 EXECUTOR_RESULT 解析失败")
+        return None
+
+
+def _extract_executor_status(content: str) -> tuple[str | None, str | None]:
+    """从 execute_plan 返回的 ToolMessage 内容中提取 status 和 error_detail。
+
+    返回 (status, error_detail)，解析失败时返回 (None, None)。
+    """
+    import json as _json
+    import re as _re
+    match = _re.search(r'\[EXECUTOR_RESULT\]\s*(\{.*\})', content, _re.DOTALL)
+    if not match:
+        return None, None
+    try:
+        meta = _json.loads(match.group(1))
+        return meta.get("status"), meta.get("error_detail")
+    except _json.JSONDecodeError:
+        return None, None
 
 
 # ==================== 图定义 ====================

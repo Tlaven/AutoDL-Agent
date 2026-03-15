@@ -8,13 +8,13 @@
 4. 与项目整体风格完全一致（StateGraph + async）
 """
 
-from datetime import UTC, datetime
-from typing import List, Dict, Any
+from typing import List, Dict
 import re
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.runnables import RunnableConfig
 
 from common.utils import load_chat_model
 from common.prompts import SYSTEM_PROMPT
@@ -28,18 +28,27 @@ async def call_planner(state: PlannerState) -> Dict[str, List[BaseMessage]]:
     """Planner 核心节点：把规则放在最后 + 强制 JSON 输出"""
     model = load_chat_model("siliconflow:Pro/deepseek-ai/DeepSeek-V3.2")
 
-    messages = state.messages[:-1].copy()
+    # 过滤掉所有带 tool_calls 的 AIMessage（对 Planner 无意义，且可能造成误解）
+    messages = [
+        m for m in state.messages
+        if not (isinstance(m, AIMessage) and m.tool_calls)
+    ]
 
-    if SYSTEM_PROMPT.strip():
+    # 只在尚未包含 SYSTEM_PROMPT 时插入（避免 Executor 重规划时 checkpoint 续接后重复）
+    already_has_system = any(
+        isinstance(m, SystemMessage) and SYSTEM_PROMPT.strip() in m.content
+        for m in messages
+    )
+    if SYSTEM_PROMPT.strip() and not already_has_system:
         messages.insert(0, SystemMessage(content=SYSTEM_PROMPT))
 
     messages.append(
-        SystemMessage(
+        HumanMessage(
             content=PLANNER_SYSTEM_PROMPT
         )
     )
 
-    # 调用模型（不绑定任何工具，Planner 只负责输出 JSON 文本）
+    # 调用模型（Planner 负责输出 JSON 文本）
     response = await model.ainvoke(messages)
 
     content = response.content.strip() if isinstance(response.content, str) else ""
@@ -47,8 +56,7 @@ async def call_planner(state: PlannerState) -> Dict[str, List[BaseMessage]]:
     # 防御：若 LLM 误将输出写入 tool_calls 而非 content，提前报错而非静默返回空
     if not content:
         raise RuntimeError(
-            "Planner 模型未返回文本内容。"
-            "请检查提示词是否触发了意外的工具调用模式。"
+            "Planner 未返回文本内容。"
         )
 
     return {
@@ -72,7 +80,7 @@ planner_graph = builder.compile(name="Planner Agent")
 async def run_planner(
     messages: List[BaseMessage],
     thread_id: str,   # 必须传入，通常来自 supervisor 的 planner_session.session_id
-    config: Dict | None = None
+    config: RunnableConfig | None = None
 ) -> str:
     """
     运行 planner，返回生成的 JSON 计划字符串
@@ -88,7 +96,7 @@ async def run_planner(
     if config is None:
         config = {"configurable": {"thread_id": thread_id}}
 
-    input_state = {"messages": messages}
+    input_state = PlannerState(messages=messages)
     result = await planner_graph.ainvoke(
             input_state,
             config=config

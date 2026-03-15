@@ -1,9 +1,7 @@
 """Define the state structures for the agent."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
-from typing import Sequence, Optional
+from collections.abc import Sequence
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph import add_messages
@@ -21,28 +19,14 @@ class InputState:
     messages: Annotated[Sequence[AnyMessage], add_messages] = field(
         default_factory=list
     )
-    """
-    跟踪代理主要执行状态的消息。
-
-    通常积累的模式如下：1. HumanMessage - 用户输入 2. 带有 .tool_calls 的 AIMessage - 代理选择用于收集信息的工具 
-    3. ToolMessage(s) - 执行工具后的响应（或错误） 4. 不带 .tool_calls 的 AIMessage - 代理以非结构化格式对用户进行响应 
-    5. HumanMessage - 用户在下一个对话回合中做出响应
-
-    步骤2至5可根据需要重复执行。
-
-    `add_messages` 注解确保新消息与现有消息合并，除非提供了具有相同ID的消息，否则将按ID进行更新，以保持“仅可追加”状态。
-    """
 
 @dataclass
 class PlannerSession:
     """表示一次活跃的 planner 会话的上下文"""
     session_id: str
-    plan_json: Optional[str] = None          # 最新的规划 JSON 字符串
-    # 未来可以轻松加字段
-    # status: str = "active"                 # active / completed / failed / needs_refine
-    # version: int = 1
-    # created_at: str = field(default_factory=utc_now_iso)
-    # last_updated_at: Optional[str] = None
+    plan_json: str | None = None             # 最新的规划 JSON 字符串（含步骤执行状态）
+    last_executor_status: str | None = None  # 最近一次 Executor 的结果："completed" / "failed"
+    last_executor_error: str | None = None   # 最近一次 Executor 失败时的原因（异常信息或摘要）
 
 @dataclass
 class ExecutorRef:
@@ -62,7 +46,7 @@ class State(InputState):
     这个类可用于存储代理生命周期中所需的任何信息。
     """
     messages: Annotated[list[AnyMessage], add_messages] = field(default_factory=list)
-    planner_session: Optional[PlannerSession] = None
+    planner_session: PlannerSession | None = None
     executors: dict[str, ExecutorRef] = field(default_factory=dict)
     is_last_step: IsLastStep = field(default=False)
 
