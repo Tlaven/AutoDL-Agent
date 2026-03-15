@@ -10,51 +10,49 @@
 
 from datetime import UTC, datetime
 from typing import List, Dict, Any
+import re
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
 
 from common.utils import load_chat_model
 from common.prompts import SYSTEM_PROMPT
 from .state import PlannerState
 from .prompts import PLANNER_SYSTEM_PROMPT
 
+# MemorySaver 全局实例（或在 compile 时创建）
+checkpointer = MemorySaver()
 
 async def call_planner(state: PlannerState) -> Dict[str, List[BaseMessage]]:
     """Planner 核心节点：把规则放在最后 + 强制 JSON 输出"""
     model = load_chat_model("siliconflow:Pro/deepseek-ai/DeepSeek-V3.2")
 
-    messages = state.messages.copy()
+    messages = state.messages[:-1].copy()
 
-    if PLANNER_SYSTEM_PROMPT.strip():
-        messages.insert(0, SystemMessage(content=PLANNER_SYSTEM_PROMPT))
+    if SYSTEM_PROMPT.strip():
+        messages.insert(0, SystemMessage(content=SYSTEM_PROMPT))
 
     messages.append(
         SystemMessage(
-            content=SYSTEM_PROMPT
+            content=PLANNER_SYSTEM_PROMPT
         )
     )
 
-    # 4. 最后一条用户指令（强制 JSON）
-    messages.append(
-        HumanMessage(
-            content=(
-                "根据以上全部对话历史，立即生成完整的深度学习任务执行计划。\n"
-                "要求：\n"
-                "1. 严格只输出合法的 JSON 对象，不要输出任何其他文字、markdown、代码块、思考过程、解释、致歉。\n"
-                "2. JSON 必须包含以下字段（不允许缺少）：\n"
-                '   "title", "objective", "requirements", "steps", "success_criteria", "risks_and_fallbacks"\n'
-                "现在就开始输出 JSON！"
-            )
-        )
-    )
-
-    # 调用模型
+    # 调用模型（不绑定任何工具，Planner 只负责输出 JSON 文本）
     response = await model.ainvoke(messages)
 
-    # 返回新消息（保持状态更新）
+    content = response.content.strip() if isinstance(response.content, str) else ""
+
+    # 防御：若 LLM 误将输出写入 tool_calls 而非 content，提前报错而非静默返回空
+    if not content:
+        raise RuntimeError(
+            "Planner 模型未返回文本内容。"
+            "请检查提示词是否触发了意外的工具调用模式。"
+        )
+
     return {
-        "messages": [AIMessage(content=response.content.strip())]
+        "messages": [AIMessage(content=content, name="planner")]
     }
 
 
@@ -71,31 +69,37 @@ planner_graph = builder.compile(name="Planner Agent")
 
 
 # ==================== 对外暴露的运行函数 ====================
-async def run_planner(messages: List[BaseMessage]) -> str:
+async def run_planner(
+    messages: List[BaseMessage],
+    thread_id: str,   # 必须传入，通常来自 supervisor 的 planner_session.session_id
+    config: Dict | None = None
+) -> str:
     """
-    推荐使用的入口函数。
-    输入：任意历史消息列表
-    输出：干净的 JSON 字符串（计划）
+    运行 planner，返回生成的 JSON 计划字符串
+    
+    Args:
+        messages: 当前输入的消息列表（可以是 supervisor 传来的全部历史）
+        thread_id: planner 会话 ID（与 supervisor.planner_session.session_id 对应）
+        config: 可选的额外配置（通常不需要手动传）
+    
+    Returns:
+        str: 干净的 JSON 字符串
     """
-    result = await planner_graph.ainvoke({"messages": messages})
+    if config is None:
+        config = {"configurable": {"thread_id": thread_id}}
+
+    input_state = {"messages": messages}
+    result = await planner_graph.ainvoke(
+            input_state,
+            config=config
+        )
     
     final_message = result["messages"][-1]
     content = final_message.content.strip()
-
-    # 额外清理（防止模型偶尔还是加了 ```json）
-    if content.startswith("```json"):
-        content = content.split("```json", 1)[1].rsplit("```", 1)[0].strip()
-    elif content.startswith("```"):
-        content = content.split("```", 2)[1].strip()
-
-    return content
-
-
-# ==================== 测试用同步接口 ====================
-def plan_simple(task_description: str) -> str:
-    """快速测试用"""
-    import asyncio
-    from langchain_core.messages import HumanMessage
     
-    messages = [HumanMessage(content=task_description)]
-    return asyncio.run(run_planner(messages))
+    matches = re.findall(r'```(?:json)?\s*([\s\S]*?)```', content, re.IGNORECASE | re.DOTALL)
+    # 检查匹配数量
+    if len(matches) == 0 or len(matches) > 1:
+        return content
+    else:
+        return matches[0].strip()
