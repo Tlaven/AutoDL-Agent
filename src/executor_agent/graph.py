@@ -10,8 +10,9 @@ from langgraph.graph import StateGraph, START
 from langgraph.managed import IsLastStep
 
 from common.utils import load_chat_model
-from .prompts import EXECUTOR_SYSTEM_PROMPT
-from .tools import get_executor_tools
+from .prompts import get_executor_system_prompt
+from .tools import get_executor_capabilities_docs, get_executor_tools
+
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,8 @@ class ExecutorResult:
 async def call_executor(state: ExecutorState) -> dict[str, Any]:
     """Executor 核心节点：ReAct 循环的 LLM 调用"""
     available_tools = get_executor_tools()
+    capabilities = get_executor_capabilities_docs()
+    executor_system_prompt = get_executor_system_prompt(capabilities)
     model = load_chat_model("siliconflow:Pro/deepseek-ai/DeepSeek-V3.2").bind_tools(
         available_tools
     )
@@ -46,9 +49,10 @@ async def call_executor(state: ExecutorState) -> dict[str, Any]:
     response = cast(
         AIMessage,
         await model.ainvoke(
-            [{"role": "system", "content": EXECUTOR_SYSTEM_PROMPT}, *state.messages]
+            [{"role": "system", "content": executor_system_prompt}, *state.messages]
         ),
     )
+
 
     # 达到最大步数时强制终止工具调用
     if state.is_last_step and response.tool_calls:

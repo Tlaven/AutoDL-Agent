@@ -18,8 +18,10 @@ from langchain_core.runnables import RunnableConfig
 
 from common.utils import load_chat_model
 from common.prompts import SYSTEM_PROMPT
+from src.executor_agent.tools import get_executor_capabilities_docs
 from .state import PlannerState
-from .prompts import PLANNER_SYSTEM_PROMPT
+from .prompts import get_planner_system_prompt
+
 
 # MemorySaver 全局实例（或在 compile 时创建）
 checkpointer = MemorySaver()
@@ -42,11 +44,14 @@ async def call_planner(state: PlannerState) -> dict[str, list[BaseMessage]]:
     if SYSTEM_PROMPT.strip() and not already_has_system:
         messages.insert(0, SystemMessage(content=SYSTEM_PROMPT))
 
+    capabilities = get_executor_capabilities_docs()
+    planner_system_prompt = get_planner_system_prompt(capabilities)
     messages.append(
         SystemMessage(
-            content=PLANNER_SYSTEM_PROMPT
+            content=planner_system_prompt
         )
     )
+
 
     # 调用模型（Planner 负责输出 JSON 文本）
     response = await model.ainvoke(messages)

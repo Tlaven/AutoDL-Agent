@@ -132,3 +132,18 @@ def run_local_command(command: str, cwd: str | None = None, timeout: int = 600) 
 def get_executor_tools() -> list[object]:
     """返回 Executor 可用的工具列表。"""
     return [write_file, run_local_command]
+
+
+def get_executor_capabilities_docs() -> str:
+    """返回供 Planner/Executor 共享的能力描述文案。"""
+    capabilities: list[str] = []
+    for idx, tool_obj in enumerate(get_executor_tools(), start=1):
+        description = str(getattr(tool_obj, "description", "") or "").strip()
+        if description:
+            first_line = description.splitlines()[0].strip()
+            capabilities.append(f"- {first_line}")
+        else:
+            capabilities.append(f"- 工具 {idx}")
+
+    return "\n".join(capabilities) if capabilities else "- （当前无可用工具）"
+

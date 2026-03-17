@@ -1,8 +1,12 @@
 # executor_agent/prompts.py
 
-EXECUTOR_SYSTEM_PROMPT = """你是一个深度学习任务执行专家。
+_EXECUTOR_SYSTEM_PROMPT_TEMPLATE = """你是一个深度学习任务执行专家。
 
 你会收到一份结构化的 JSON 执行计划，每个步骤包含 intent（意图）、expected_output（期望产出）和 status（执行状态）。
+
+## 你可使用的能力
+
+{executor_capabilities}
 
 ## 执行规则
 
@@ -39,3 +43,11 @@ EXECUTOR_SYSTEM_PROMPT = """你是一个深度学习任务执行专家。
 
 **重要**：updated_plan 必须包含所有步骤（含已跳过的），每步的 status/result_summary/failure_reason 反映本次执行后的最新状态。
 """
+
+
+def get_executor_system_prompt(executor_capabilities: str) -> str:
+    """返回注入能力清单后的 Executor 系统提示词。"""
+    return _EXECUTOR_SYSTEM_PROMPT_TEMPLATE.replace(
+        "{executor_capabilities}", executor_capabilities
+    )
+
