@@ -1,77 +1,8 @@
-.PHONY: all format lint test test_unit test_integration test_e2e test_all evals eval_graph eval_multiturn eval_graph_qwen eval_graph_glm eval_multiturn_polite eval_multiturn_hacker test_watch test_watch_unit test_watch_integration test_watch_e2e test_profile extended_tests dev dev_ui
+.PHONY: all format lint test test_unit test_integration test_e2e test_all evals eval_graph eval_multiturn eval_graph_qwen eval_graph_glm eval_multiturn_polite eval_multiturn_hacker test_watch test_watch_unit test_watch_integration test_watch_e2e test_profile extended_tests dev dev_ui test_supervisor_unit test_supervisor_integration test_supervisor_trace test_supervisor_e2e test_supervisor_all
 
 # Default target executed when no arguments are given to make.
 all: help
 
-######################
-# TESTING
-######################
-
-# Legacy test command (defaults to unit and integration tests for backward compatibility)
-test: test_unit test_integration
-
-# Specific test targets
-test_unit:
-	uv run python -m pytest tests/unit_tests/
-
-test_integration:
-	uv run python -m pytest tests/integration_tests/
-
-test_e2e:
-	uv run python -m pytest tests/e2e_tests/
-
-test_all:
-	uv run python -m pytest tests/
-
-######################
-# EVALUATIONS
-######################
-
-# Comprehensive evaluation suite
-evals: eval_graph eval_multiturn
-
-# Graph trajectory evaluation (scenario-specific LLM-as-judge)
-eval_graph:
-	cd tests/evaluations && python graph.py --verbose
-
-# Multi-turn chat evaluation (role-persona simulations)
-eval_multiturn:
-	cd tests/evaluations && python multiturn.py --verbose
-
-# Run specific evaluation scenarios
-eval_graph_qwen:
-	cd tests/evaluations && python graph.py --model siliconflow:Qwen/Qwen3-8B --verbose
-
-eval_graph_glm:
-	cd tests/evaluations && python graph.py --model siliconflow:THUDM/GLM-4-9B-0414 --verbose
-
-eval_multiturn_polite:
-	cd tests/evaluations && python multiturn.py --persona polite --verbose
-
-eval_multiturn_hacker:
-	cd tests/evaluations && python multiturn.py --persona hacker --verbose
-
-######################
-# WATCH MODES
-######################
-
-# Watch mode for tests
-test_watch: test_watch_unit
-
-test_watch_unit:
-	uv run python -m ptw --snapshot-update --now . -- -vv tests/unit_tests
-
-test_watch_integration:
-	uv run python -m ptw --snapshot-update --now . -- -vv tests/integration_tests
-
-test_watch_e2e:
-	uv run python -m ptw --snapshot-update --now . -- -vv tests/e2e_tests
-
-test_profile:
-	uv run python -m pytest -vv tests/unit_tests/ --profile-svg
-
-extended_tests:
-	uv run python -m pytest --only-extended tests/unit_tests/
 
 ######################
 # DEVELOPMENT
@@ -82,6 +13,27 @@ dev:
 
 dev_ui:
 	uv run langgraph dev
+
+
+######################
+# TESTS
+######################
+
+test_supervisor_unit:
+	uv run pytest tests/unit_tests/supervisor_agent -q
+
+test_supervisor_integration:
+	uv run pytest tests/integration_tests/supervisor_agent -q
+
+test_supervisor_trace:
+	uv run pytest tests/integration_tests/supervisor_agent/test_supervisor_internal_trajectory.py -q
+
+test_supervisor_e2e:
+	uv run pytest tests/e2e_tests/supervisor_agent -q
+
+
+test_supervisor_all:
+	uv run pytest tests/e2e_tests/supervisor_agent tests/integration_tests/supervisor_agent tests/unit_tests/supervisor_agent -q
 
 
 ######################
@@ -136,25 +88,12 @@ help:
 	@echo 'dev                          - run langgraph dev without browser'
 	@echo 'dev_ui                       - run langgraph dev with browser'
 	@echo ''
-	@echo 'TESTING:'
-	@echo 'test                         - run unit tests (default)'
-	@echo 'test_unit                    - run unit tests only'
-	@echo 'test_integration             - run integration tests only'
-	@echo 'test_e2e                     - run e2e tests only'
-	@echo 'test_all                     - run all tests (unit + integration + e2e)'
-	@echo 'test_watch                   - run unit tests in watch mode'
-	@echo 'test_watch_unit              - run unit tests in watch mode'
-	@echo 'test_watch_integration       - run integration tests in watch mode'
-	@echo 'test_watch_e2e               - run e2e tests in watch mode'
-	@echo ''
-	@echo 'EVALUATIONS:'
-	@echo 'evals                        - run comprehensive evaluation suite (all models)'
-	@echo 'eval_graph                   - run graph trajectory evaluations (LLM-as-judge)'
-	@echo 'eval_multiturn               - run multi-turn chat evaluations (role-persona)'
-	@echo 'eval_graph_qwen              - run graph evaluation with Qwen/Qwen3-8B model'
-	@echo 'eval_graph_glm               - run graph evaluation with THUDM/GLM-4-9B model'
-	@echo 'eval_multiturn_polite        - run multiturn with polite persona only'
-	@echo 'eval_multiturn_hacker        - run multiturn with hacker persona only'
+	@echo 'TESTS:'
+	@echo 'test_supervisor_unit         - run supervisor unit tests'
+	@echo 'test_supervisor_integration  - run supervisor integration smoke tests'
+	@echo 'test_supervisor_trace        - run supervisor internal trajectory assertions'
+	@echo 'test_supervisor_e2e          - run supervisor e2e smoke tests'
+	@echo 'test_supervisor_all          - run all supervisor tests (unit+integration+e2e)'
 	@echo ''
 	@echo 'CODE QUALITY:'
 	@echo 'format                       - run code formatters'
