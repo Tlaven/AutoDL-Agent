@@ -120,13 +120,14 @@ class ExecutorResult:
 
 当前阶段明确为**单线程**，不做并发 Executor。
 
-### 8. Executor 工具现状（空，待接入）
+### 8. Executor 工具现状
 
-`src/executor_agent/tools.py` 当前返回空列表，待后续接入真实工具：
-- `search_huggingface_hub`：搜索 HuggingFace Hub 上的模型和数据集
-- `propose_training_code`：生成可运行的训练代码
-- `execute_training_code`：本地执行训练脚本（subprocess）
-- `save_final_report`：保存实验报告
+`src/executor_agent/tools.py` 已接入以下工具：
+
+- `write_file(path, content, overwrite=True)`：将文本内容写入本地文件，自动递归创建目录；可控制是否覆盖；返回结构化结果（ok/path/overwritten/bytes/error）。
+- `run_local_command(command, cwd=None, timeout=600)`：本地命令执行能力（当前过渡方案）。
+
+后续将迁移为 **Sandbox 执行**：Executor 默认在隔离环境中运行代码，逐步替换直接本地命令执行路径。
 
 ### 9. Planner 工具现状（定义但未绑定）
 
@@ -149,7 +150,7 @@ Planner 调用时的消息处理逻辑（已实现）：
 
 - [ ] Executor 工具接入真实 HuggingFace Hub API（`search_huggingface_hub`）
 - [ ] `propose_training_code` 生成真实可运行的训练代码文件（写入本地 .py 文件）
-- [ ] 添加本地执行训练代码的工具（`execute_training_code`，用 subprocess）
+- [ ] 添加 Sandbox 执行训练代码能力（`execute_training_code` 基于隔离环境运行，替代直接 subprocess 本地执行）
 - [ ] `save_final_report` 写入本地文件
 - [ ] 补充测试用例（tests/ 目前全为空）
 
@@ -172,7 +173,7 @@ Planner 调用时的消息处理逻辑（已实现）：
 | `src/planner_agent/tools.py` | 4 个规划工具（已定义，未绑定到 graph） |
 | `src/executor_agent/graph.py` | Executor 自定义 StateGraph，`ExecutorState`、`ExecutorResult`、`call_executor` + `tools_node` + `route_executor_output`、`_parse_executor_output`、`run_executor()` 对外接口 |
 | `src/executor_agent/prompts.py` | `EXECUTOR_SYSTEM_PROMPT`，按 intent 自主选工具，遇阻停止，输出 updated_plan |
-| `src/executor_agent/tools.py` | 空列表占位，待接入真实工具 |
+| `src/executor_agent/tools.py` | Executor 工具集合（含 `write_file`、`run_local_command`） |
 | `src/common/context.py` | 运行时配置，支持环境变量覆盖 |
 | `src/common/prompts.py` | `SYSTEM_PROMPT`，Supervisor 全局系统提示 |
 | `src/common/utils.py` | `load_chat_model("provider:model")` 统一入口 |

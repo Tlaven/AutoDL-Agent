@@ -8,7 +8,7 @@
 4. 与项目整体风格完全一致（StateGraph + async）
 """
 
-from typing import List, Dict
+
 import re
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -24,7 +24,7 @@ from .prompts import PLANNER_SYSTEM_PROMPT
 # MemorySaver 全局实例（或在 compile 时创建）
 checkpointer = MemorySaver()
 
-async def call_planner(state: PlannerState) -> Dict[str, List[BaseMessage]]:
+async def call_planner(state: PlannerState) -> dict[str, list[BaseMessage]]:
     """Planner 核心节点：把规则放在最后 + 强制 JSON 输出"""
     model = load_chat_model("siliconflow:Pro/deepseek-ai/DeepSeek-V3.2")
 
@@ -43,7 +43,7 @@ async def call_planner(state: PlannerState) -> Dict[str, List[BaseMessage]]:
         messages.insert(0, SystemMessage(content=SYSTEM_PROMPT))
 
     messages.append(
-        HumanMessage(
+        SystemMessage(
             content=PLANNER_SYSTEM_PROMPT
         )
     )
@@ -78,7 +78,7 @@ planner_graph = builder.compile(name="Planner Agent")
 
 # ==================== 对外暴露的运行函数 ====================
 async def run_planner(
-    messages: List[BaseMessage],
+    messages: list[BaseMessage],
     thread_id: str,   # 必须传入，通常来自 supervisor 的 planner_session.session_id
     config: RunnableConfig | None = None
 ) -> str:
@@ -98,9 +98,9 @@ async def run_planner(
 
     input_state = PlannerState(messages=messages)
     result = await planner_graph.ainvoke(
-            input_state,
-            config=config
-        )
+        input_state,
+        config=config
+    )
     
     final_message = result["messages"][-1]
     content = final_message.content.strip()
