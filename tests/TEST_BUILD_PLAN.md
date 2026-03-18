@@ -1,18 +1,18 @@
 # 测试构建计划（MVP）
 
-本计划用于 `supervisor_agent` 的分层测试落地，目标是**少而关键**，先保稳定再扩覆盖。
+本计划用于 `supervisor_agent` 的测试落地，目标是：**少而关键、避免重复、稳定可回归**。
 
-## 1. 目标与原则
+## 1. 测试目标
 
-- 先保证主流程可用：状态流转、异常兜底、路由正确。
-- 测试分层：`unit` 为主，补少量 `integration/e2e smoke`。
-- 避免过度细节断言，优先断言对业务稳定性有影响的结果。
+- 保证主流程可用：状态流转、工具路由、失败兜底。
+- 优先覆盖高风险行为：`planner_session` 回填、`[EXECUTOR_RESULT]` 解析、失败后收敛。
+- 不追求表面覆盖率，优先“对稳定性有价值”的断言。
 
-## 2. 分层范围
+## 2. 当前测试版图（按层，不按时间）
 
-### A. Unit（已完成）
+### Unit
 
-覆盖函数：
+覆盖模块：
 - `src/supervisor_agent/graph.py`
   - `_extract_updated_plan_from_executor`
   - `_extract_executor_status`
@@ -27,96 +27,88 @@
 - `tests/unit_tests/supervisor_agent/test_tools_mark_failed.py`
 - `tests/unit_tests/supervisor_agent/test_graph_nodes.py`
 
-### B. Integration Smoke（已完成 2 条）
+关键场景：
+- 正常解析/路由。
+- 脏输出或缺字段时的容错。
+- `execute_plan` 元数据回填到 `planner_session`。
+- **Executor 异常抛出路径**（已覆盖）：模拟 `run_executor` 抛异常，校验 `_mark_plan_steps_failed` 与结构化回填。
+
+### Integration（mock 下游，验证主循环契约）
 
 已落地文件：
 - `tests/integration_tests/supervisor_agent/test_supervisor_smoke.py`
+- `tests/integration_tests/supervisor_agent/test_supervisor_internal_trajectory.py`
+- `tests/integration_tests/supervisor_agent/test_supervisor_multiturn_state_evolution.py`
+- `tests/integration_tests/supervisor_agent/test_supervisor_executor_result_contract.py`
 
-覆盖场景：
-1. `happy path`：`generate_plan -> execute_plan -> 结束`
-2. `failure path`：`execute_plan` 回传 `failed` 后的状态回填
+关键场景：
+- `happy path`：`generate_plan -> execute_plan -> end`。
+- `failure path`：失败状态与错误信息回填。
+- 消息轨迹可机检（Human/AI/Tool 顺序、`tool_call_id` 对齐）。
+- `[EXECUTOR_RESULT]` 契约脏数据兜底（invalid json、缺 marker、缺 `updated_plan_json`）。
+- 失败后重规划再执行成功。
+- **连续失败后收敛**（已覆盖）：两次失败后再次重规划，第三次执行成功。
 
-说明：Integration 层采用 mock 下游调用，保证稳定与可重复。
-
-### C. E2E Smoke（已完成 1 条）
+### E2E Smoke
 
 已落地文件：
 - `tests/e2e_tests/supervisor_agent/test_supervisor_e2e_smoke.py`
 
-覆盖场景：
-- 完整启动 supervisor graph，单轮对话触发 `generate_plan -> execute_plan -> end`
-- 验证最终收敛、状态回填与计划更新
+关键场景：
+- 完整 supervisor graph 单轮收敛。
+- 最终状态、计划更新、结束条件验证。
 
-## 3. 里程碑状态
+## 3. 防重复清单（已完成项）
 
-- M1（已完成）：核心 unit（解析 + 异常兜底 + 路由）
-- M2（已完成）：关键节点 unit（`call_model`、`dynamic_tools_node`）
-- M3（已完成）：2 条 integration smoke
-- M4（已完成）：1 条 e2e smoke
+以下能力已具备，后续不要重复造同类用例：
 
-## 4. 当前结果
+- 轨迹顺序与 `tool_call_id` 一致性校验。
+- `planner_session.last_executor_status / last_executor_error / plan_json` 回填校验。
+- `completed / failed` 双路径覆盖。
+- 失败后重规划收敛覆盖。
+- `[EXECUTOR_RESULT]` 脏输出契约兜底。
+- Executor 抛异常时 `_mark_plan_steps_failed` 兜底。
+- 多次连续失败后的状态演进一致性。
 
-- `uv run pytest tests/e2e_tests/supervisor_agent tests/integration_tests/supervisor_agent tests/unit_tests/supervisor_agent -q` → `22 passed`
-- integration/e2e/unit 组合用例连续执行 3 次：
-  - Run 1: `22 passed in 0.78s`
-  - Run 2: `22 passed in 0.76s`
-  - Run 3: `22 passed in 0.76s`
+## 4. 运行命令
 
-## 5. 通过标准（MVP）
-
-- `tests/unit_tests/supervisor_agent` 全部通过（已满足）
-- integration smoke 稳定通过（连续 3 次）（已满足）
-- 流程失败时能看到明确错误状态与回填信息（已满足）
-
-
-## 6. 执行命令
+全量（supervisor 相关）：
 
 ```bash
 uv run pytest tests/e2e_tests/supervisor_agent tests/integration_tests/supervisor_agent tests/unit_tests/supervisor_agent -q
 ```
 
-> 注：若后续加入“LLM 质量评审”，建议作为 nightly/手动评估，不作为主 CI 阻塞条件。
+关键门禁：
 
-## 7. 新增测试触发条件（避免过度测试）
+```bash
+make test_supervisor_key
+```
 
-仅在以下情况新增用例：
-- 修改了 `supervisor_agent` 的状态字段或状态回写逻辑
-- 修改了 `[EXECUTOR_RESULT]` 的结构或解析规则
-- 调整了路由分支（`tools` / `__end__`）或步数收敛策略
-- 修复线上/真实使用中出现过的回归问题
+增量定向（本次新增场景）：
 
-不因纯文案调整、日志调整而新增测试。
+```bash
+uv run pytest tests/unit_tests/supervisor_agent/test_graph_nodes.py tests/integration_tests/supervisor_agent/test_supervisor_multiturn_state_evolution.py -q
+```
 
-## 8. 暂不纳入主门禁的范围
+## 5. 新增测试触发条件（避免过度测试）
 
-- LLM 输出文风/措辞质量评审
-- 长链路、多轮复杂任务的语义评分
+仅在以下情况新增：
+- 修改 `supervisor_agent` 状态字段或回写逻辑。
+- 修改 `[EXECUTOR_RESULT]` 结构或解析规则。
+- 调整路由分支（`tools` / `__end__`）或收敛策略。
+- 修复真实回归问题（线上/实际使用）。
 
-以上可作为评估脚本或 nightly 任务，不阻塞日常开发合并。
+不因文案、日志、注释变更新增测试。
 
-## 9. 阶段记录（自动化内部运行验证）
+## 6. 暂不纳入主门禁
 
-### 目前已完成
+- LLM 文风/措辞质量评审。
+- 长链路多轮语义评分。
 
-- 新增内部轨迹自动化测试：
-  - `tests/integration_tests/supervisor_agent/test_supervisor_internal_trajectory.py`
-- 新增命令入口：
-  - `make test_supervisor_trace`
-- 已实现的自动断言能力：
-  - 自动检查消息轨迹顺序（`Human -> AI(tool) -> Tool -> AI(tool) -> Tool -> AI(final)`）
-  - 自动检查 `tool_call_id` 与 `tool_calls.id` 的一致性
-  - 自动检查 `planner_session` 的 `last_executor_status`、`last_executor_error`、`plan_json` 回填
-  - 覆盖 `completed` / `failed` 两条执行路径
-- 当前回归结果（含新增轨迹测试）：
-  - `uv run pytest tests/integration_tests/supervisor_agent/test_supervisor_internal_trajectory.py tests/integration_tests/supervisor_agent/test_supervisor_smoke.py tests/e2e_tests/supervisor_agent/test_supervisor_e2e_smoke.py tests/unit_tests/supervisor_agent -q` → `24 passed`
+可作为手动评估，不阻塞日常合并。
 
-### 未来打算做什么（下一阶段）
+## 7. 下一步（尚未完成）
 
-- 新增“多轮状态演进”自动化测试：
-  - 验证多轮输入下 `planner_session.plan_json` 与 `last_executor_*` 的阶段性变化和收敛
-- 新增“异常/脏输出契约”回归测试：
-  - 重点覆盖 `[EXECUTOR_RESULT]` 缺字段、脏 JSON、混合文本等场景
-  - 确保解析失败时仍能稳定兜底，不破坏主流程
-- 增加统一测试入口：
-  - 提供一条命令聚合 smoke + trajectory + contract 关键检查，降低人工验证成本
-
+- 接入 LLM 质量评测：
+  - 用固定任务集评估意图理解、工具选择、最终答复质量。
+  - 可按节点级输入/输出预期构建评测样例。
