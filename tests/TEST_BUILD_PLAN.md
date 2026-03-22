@@ -69,6 +69,11 @@
 - `[EXECUTOR_RESULT]` 脏输出契约兜底。
 - Executor 抛异常时 `_mark_plan_steps_failed` 兜底。
 - 多次连续失败后的状态演进一致性。
+- Executor 工具安全边界回归（已覆盖）：
+  - `write_file` 相对路径/拒绝 `..`/内容大小上限
+  - `run_local_command` 空命令、危险命令、无效 `cwd`、超时约束
+  - `call_executor` 的 `write_file` 参数合理性（live_llm）
+
 
 ## 4. 运行命令
 
@@ -106,9 +111,3 @@ uv run pytest tests/unit_tests/supervisor_agent/test_graph_nodes.py tests/integr
 - 长链路多轮语义评分。
 
 可作为手动评估，不阻塞日常合并。
-
-## 7. 下一步（尚未完成）
-
-- 接入 LLM 质量评测：
-  - 用固定任务集评估意图理解、工具选择、最终答复质量。
-  - 可按节点级输入/输出预期构建评测样例。

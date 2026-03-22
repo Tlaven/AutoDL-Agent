@@ -69,6 +69,10 @@ convention = "google"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "live_llm: tests that call real LLM APIs",
+]
+
 
 [dependency-groups]
 dev = [
